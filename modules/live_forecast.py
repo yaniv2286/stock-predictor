@@ -1,22 +1,29 @@
+# modules/live_forecast.py
+
 import streamlit as st
 import yfinance as yf
-import numpy as np
 import pandas as pd
+import numpy as np
 import matplotlib.pyplot as plt
-from sklearn.preprocessing import MinMaxScaler
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout
-from .utils import compute_rsi
+from models import lstm_model, random_forest_model, xgboost_model
+from modules.utils import compute_rsi
 
-def run_live_forecast():
-    st.title("📈 Live LSTM Stock Forecast")
+MODELS = {
+    "LSTM": lstm_model,
+    "Random Forest": random_forest_model,
+    "XGBoost": xgboost_model
+}
+
+def run_live_forecast(model_name):
+    st.title(f"📈 Live Stock Forecast ({model_name})")
+    model_module = MODELS[model_name]
 
     ticker = st.text_input("Enter Stock Ticker:", value="AAPL", max_chars=10)
     forecast_days = 7
     sequence_length = 60
 
     if st.button("Predict"):
-        with st.spinner("Fetching and training..."):
+        with st.spinner("Fetching data and training model..."):
             df = yf.download(ticker, start="2000-01-01")
             df['EMA'] = df['Close'].ewm(span=20).mean()
             df['RSI'] = compute_rsi(df['Close'])
@@ -35,42 +42,22 @@ def run_live_forecast():
             bb_lower = bb_mean - 2 * bb_std
             df['BB_percent'] = (df['Close'] - bb_lower) / (bb_upper - bb_lower)
 
-            df = df[['Open', 'High', 'Low', 'Close', 'Volume', 'EMA', 'RSI', 'StochRSI_K', 'StochRSI_D', 'BB_percent']]
             df.dropna(inplace=True)
 
-            data = df.values
-            scaler = MinMaxScaler()
-            scaled_data = scaler.fit_transform(data)
-
-            def create_sequences(data, seq_len, forecast_len):
-                X, y = [], []
-                for i in range(len(data) - seq_len - forecast_len):
-                    X.append(data[i:i+seq_len])
-                    y.append(data[i+seq_len:i+seq_len+forecast_len, 3])
-                return np.array(X), np.array(y)
-
-            X, y = create_sequences(scaled_data, sequence_length, forecast_days)
+            # Prepare data using the selected model
+            X, y, scaler, raw_data = model_module.prepare_data(df, forecast_days, sequence_length)
             split = int(0.8 * len(X))
-            X_train, y_train = X[:split], y[:split]
-            X_test, y_test = X[split:], y[split:]
+            X_train, y_train, X_test, y_test = X[:split], y[:split], X[split:], y[split:]
 
-            # First-day forecast evaluation
-            model = Sequential([
-                LSTM(128, return_sequences=True, input_shape=(X.shape[1], X.shape[2])),
-                Dropout(0.2),
-                LSTM(64),
-                Dropout(0.2),
-                Dense(forecast_days)
-            ])
-            model.compile(optimizer='adam', loss='mse')
-            model.fit(X_train, y_train, epochs=20, batch_size=32, verbose=0)
+            model = model_module.build_model(X.shape[1:], forecast_days)
+            predictions = model_module.train_and_predict(X_train, y_train, X_test, model)
 
-            predictions = model.predict(X_test)
+
             first_day_preds = predictions[:, 0]
             first_day_actuals = y_test[:, 0]
 
-            y_pred_scaled = np.zeros((len(first_day_preds), data.shape[1]))
-            y_test_scaled = np.zeros((len(first_day_actuals), data.shape[1]))
+            y_pred_scaled = np.zeros((len(first_day_preds), raw_data.shape[1]))
+            y_test_scaled = np.zeros((len(first_day_actuals), raw_data.shape[1]))
             y_pred_scaled[:, 3] = first_day_preds
             y_test_scaled[:, 3] = first_day_actuals
 
@@ -87,17 +74,15 @@ def run_live_forecast():
             ax.set_title(f"{ticker} Forecast - First Day Accuracy")
             st.pyplot(fig)
 
-            # Predict next 7 days from last known
-            last_seq = scaled_data[-sequence_length:].reshape(1, sequence_length, data.shape[1])
-            future_pred = model.predict(last_seq)[0]
+            if len(X[-1].shape) == 1:  # Means it's flattened
+                last_seq = X[-1].reshape(1, -1)
+            else:
+                last_seq = X[-1].reshape(1, sequence_length, raw_data.shape[1])
+            future_prices = model_module.predict_future_sequence(model, last_seq, scaler, raw_data.shape, forecast_days)
 
-            dummy = np.zeros((forecast_days, data.shape[1]))
-            dummy[:, 3] = future_pred
-            future_prices = scaler.inverse_transform(dummy)[:, 3]
-
-            dates = pd.date_range(start=df.index[-1] + pd.Timedelta(days=1), periods=forecast_days, freq='B')
-            future_df = pd.DataFrame({'Date': dates, 'Predicted Close Price': future_prices})
+            future_dates = pd.date_range(start=df.index[-1] + pd.Timedelta(days=1), periods=forecast_days, freq='B')
+            forecast_df = pd.DataFrame({'Date': future_dates, 'Predicted Close Price': future_prices})
             st.subheader(f"📅 {forecast_days}-Day Forecast")
-            st.table(future_df)
+            st.table(forecast_df)
 
-            st.download_button("📥 Download Forecast CSV", future_df.to_csv(index=False), file_name="forecast.csv")
+            st.download_button("📥 Download Forecast CSV", forecast_df.to_csv(index=False), file_name="forecast.csv")

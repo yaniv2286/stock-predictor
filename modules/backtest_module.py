@@ -1,72 +1,67 @@
+# modules/backtest_module.py
+
 import streamlit as st
 import yfinance as yf
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from sklearn.preprocessing import MinMaxScaler
-from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import LSTM, Dense, Dropout
-from .utils import compute_rsi
+from modules.utils import compute_rsi, add_indicators
 
-def run_backtest():
-    st.title("🔁 Backtest: AAPL Strategy (2023–2024)")
+def run_backtest(model_name):
+    st.title(f"🔁 Backtest: AAPL Strategy (2023–2024) using {model_name}")
 
-    ticker = "AAPL"
+    ticker = st.sidebar.text_input("Enter Stock Ticker:", value="AAPL").upper()
+
     forecast_days = 7
     sequence_length = 60
     initial_cash = 10000
 
+    # Import model module
+    from models import lstm_model, random_forest_model, xgboost_model
+    model_module = {
+        "LSTM": lstm_model,
+        "Random Forest": random_forest_model,
+        "XGBoost": xgboost_model
+    }[model_name]
+
+    # Download data and preprocess
     df = yf.download(ticker, start="2010-01-01", end="2025-01-01")
     df.index = pd.to_datetime(df.index)
-    df['EMA'] = df['Close'].ewm(span=20).mean()
-    df['RSI'] = compute_rsi(df['Close'])
+    df = add_indicators(df)
 
-    df.dropna(inplace=True)
-    df = df[['Open', 'High', 'Low', 'Close', 'Volume', 'EMA', 'RSI']]
-    scaler = MinMaxScaler()
-    scaled_data = scaler.fit_transform(df.values)
+    X, y, scaler, raw_data = model_module.prepare_data(df, forecast_days, sequence_length)
 
-    train_data = scaled_data[df.index < "2023-01-01"]
-    test_data = scaled_data[df.index >= "2023-01-01"]
-    test_index = df.index[df.index >= "2023-01-01"]
+    # Split training and testing based on date
+    split_index = df.index.get_indexer([df.index[df.index >= "2023-01-01"][0]])[0]
+    X_train, y_train = X[:split_index], y[:split_index]
+    X_test, y_test = X[split_index:], y[split_index:]
+    test_dates = df.index[split_index + sequence_length + forecast_days:]
 
-    def create_sequences(data, seq_len, forecast_len):
-        X, y = [], []
-        for i in range(len(data) - seq_len - forecast_len):
-            X.append(data[i:i+seq_len])
-            y.append(data[i+seq_len:i+seq_len+forecast_len, 3])
-        return np.array(X), np.array(y)
-
-    X_train, y_train = create_sequences(train_data, sequence_length, forecast_days)
-
-    model = Sequential([
-        LSTM(128, return_sequences=True, input_shape=(X_train.shape[1], X_train.shape[2])),
-        Dropout(0.2),
-        LSTM(64),
-        Dropout(0.2),
-        Dense(forecast_days)
-    ])
-    model.compile(optimizer='adam', loss='mse')
-    model.fit(X_train, y_train, epochs=20, batch_size=32, verbose=0)
+    model = model_module.build_model(X.shape[1:], forecast_days)
+    predictions = model_module.train_and_predict(X_train, y_train, X_test, model)
 
     portfolio, buy_hold, trades = [], [], []
     cash, stock = initial_cash, 0
     buy_price = None
-    preds, actuals = [], []
 
-    for i in range(sequence_length, len(test_data) - forecast_days):
-        input_seq = test_data[i - sequence_length:i].reshape(1, sequence_length, test_data.shape[1])
-        pred = model.predict(input_seq, verbose=0)[0]
-        actual = test_data[i:i+forecast_days, 3]
-        preds.append(pred[0])
-        actuals.append(actual[0])
+    predicted_prices = predictions[:, 0]
+    actual_prices = y_test[:, 0]
 
-        today_scaled = test_data[i-1, 3]
-        today_close = scaler.inverse_transform([[0,0,0,today_scaled,0,0,0]])[0][3]
-        pred_close = scaler.inverse_transform([[0,0,0,pred[0],0,0,0]])[0][3]
+    # Inverse transform for visualization and trading logic
+    dummy = np.zeros((len(predicted_prices), raw_data.shape[1]))
+    dummy[:, 3] = predicted_prices
+    pred_close = scaler.inverse_transform(dummy)[:, 3]
+
+    dummy[:, 3] = actual_prices
+    actual_close = scaler.inverse_transform(dummy)[:, 3]
+
+    for i in range(len(pred_close)):
+        today_close = actual_close[i]
+        pred_price = pred_close[i]
 
         action = "Hold"
-        if pred_close > today_close * 1.01:
+        if pred_price > today_close * 1.01:
             if cash > 0:
                 stock = cash / today_close
                 cash = 0
@@ -77,20 +72,21 @@ def run_backtest():
                 stock = 0
                 action = "Sell"
 
-        portfolio.append(cash + stock * today_close)
-        if i == sequence_length:
+        portfolio_val = cash + stock * today_close
+        portfolio.append(portfolio_val)
+        if i == 0:
             buy_price = today_close
         buy_hold.append(initial_cash * (today_close / buy_price))
 
         trades.append({
-            "Date": test_index[i],
+            "Date": test_dates[i],
             "Today Close": round(today_close, 2),
-            "Predicted Close": round(pred_close, 2),
+            "Predicted Close": round(pred_price, 2),
             "Action": action,
-            "Portfolio": round(cash + stock * today_close, 2)
+            "Portfolio": round(portfolio_val, 2)
         })
 
-    mae = np.mean(np.abs(np.array(preds) - np.array(actuals)))
+    mae = np.mean(np.abs(pred_close - actual_close))
     strategy_final = portfolio[-1]
     buyhold_final = buy_hold[-1]
 
