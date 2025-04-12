@@ -1,0 +1,19 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+      {
+        "name": "Run Streamlit App",
+        "type": "python",
+        "request": "launch",
+        "program": "${workspaceFolder}/stock-env/Scripts/python.exe",
+        "args": [
+          "-m",
+          "streamlit",
+          "run",
+          "${workspaceFolder}/stock_predictor_app.py"
+        ],
+        "console": "integratedTerminal"
+      }
+    ]
+  }
+  

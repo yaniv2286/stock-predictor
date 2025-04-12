@@ -1,0 +1,27 @@
+# Virtual environments
+stock-env/
+env/
+.venv/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.pyc
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# VSCode
+.vscode/
+*.code-workspace
+
+# Mac system files
+.DS_Store
+
+# Streamlit cache
+.streamlit/
+
+# Logs
+*.log
